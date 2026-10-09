@@ -717,6 +717,13 @@ impl PassthroughFs {
     }
 
     fn name_to_path(&self, parent: Inode, name: &CStr) -> io::Result<CString> {
+        // Reject traversal / separator components from a (possibly raw-FUSE)
+        // client: a legitimate kernel FUSE client never sends "", ".", "..", or a
+        // name containing '/', so accepting them only enables escaping the share.
+        let nb = name.to_bytes();
+        if nb.is_empty() || nb == b"." || nb == b".." || nb.contains(&b'/') {
+            return Err(einval());
+        }
         debug!(
             "name_to_path: parent={} name={}",
             parent,
