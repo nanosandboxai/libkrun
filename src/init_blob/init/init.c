@@ -1461,6 +1461,69 @@ cleanup:
 
 #include <linux/route.h>
 
+/* ── Next-mode: background workload exec agent ─────────────────────────── */
+
+/*
+ * Parse KRUN_EXEC_AGENT ("<path>[:<port>]", default port 1024) and
+ * background-spawn the in-guest exec agent so it runs *alongside* the PID-1
+ * workload. The workload stays PID 1 (preserving the exit-code, stdio, and
+ * signal contract); the agent only serves the host vsock exec channel.
+ *
+ * Runs in the next-mode parent, so PID 1's `waitpid(-1)` reaper collects the
+ * agent if it ever dies. The child detaches from PID 1's session and silences
+ * its stdio so it never pollutes the workload console or steals its stdin.
+ * Returns 0 on success/no-op, -1 on spawn failure (non-fatal to the workload).
+ */
+static int spawn_exec_agent(void)
+{
+    const char *spec = getenv("KRUN_EXEC_AGENT");
+    char path[PATH_MAX];
+    const char *port = "1024";
+    char *colon;
+    pid_t pid;
+    int devnull;
+
+    if (!spec || *spec == '\0') {
+        return 0;
+    }
+
+    if (strlen(spec) >= sizeof(path)) {
+        printf("Warning: KRUN_EXEC_AGENT too long (ignored)\n");
+        return -1;
+    }
+    strncpy(path, spec, sizeof(path) - 1);
+    path[sizeof(path) - 1] = '\0';
+
+    colon = strrchr(path, ':');
+    if (colon) {
+        *colon = '\0';
+        port = colon + 1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        printf("Warning: exec agent fork failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (pid == 0) {
+        /* Detach from PID 1's session/controlling terminal. */
+        setsid();
+        devnull = open("/dev/null", O_RDWR);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            if (devnull > STDERR_FILENO) {
+                close(devnull);
+            }
+        }
+        execl(path, path, port, (char *)NULL);
+        _exit(127);
+    }
+
+    return 0;
+}
+
 /* ── Next-mode: static network bring-up ────────────────────────────────── */
 
 /*
@@ -1777,6 +1840,9 @@ int main(int argc, char **argv)
         if (next_mode && strcmp(next_mode, "1") == 0) {
             if (mount_extra_virtiofs() < 0) {
                 printf("Warning: extra virtiofs mounts failed (continuing)\n");
+            }
+            if (spawn_exec_agent() < 0) {
+                printf("Warning: exec agent launch failed (continuing)\n");
             }
         }
     }
