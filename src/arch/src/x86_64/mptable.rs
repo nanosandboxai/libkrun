@@ -14,6 +14,8 @@ use libc::c_char;
 use arch_gen::x86::mpspec;
 use vm_memory::{Address, ByteValued, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap};
 
+use crate::x86_64::layout::IRQ_MAX;
+
 // This is a workaround to the Rust enforcement specifying that any implementation of a foreign
 // trait (in this case `ByteValued`) where:
 // *    the type that is implementing the trait is foreign or
@@ -119,7 +121,7 @@ fn compute_mp_size(num_cpus: u8) -> usize {
         + mem::size_of::<MpcCpuWrapper>() * (num_cpus as usize)
         + mem::size_of::<MpcIoapicWrapper>()
         + mem::size_of::<MpcBusWrapper>()
-        + mem::size_of::<MpcIntsrcWrapper>() * 16
+        + mem::size_of::<MpcIntsrcWrapper>() * (IRQ_MAX as usize + 1)
         + mem::size_of::<MpcLintsrcWrapper>() * 2
 }
 
@@ -214,8 +216,10 @@ pub fn setup_mptable(mem: &GuestMemoryMmap, num_cpus: u8) -> Result<()> {
         base_mp = base_mp.unchecked_add(size);
         checksum = checksum.wrapping_add(compute_checksum(&mpc_ioapic.0));
     }
-    // Per kvm_setup_default_irq_routing() in kernel
-    for i in 0..16 {
+    // Describe every IOAPIC pin (not just the legacy ISA range) so the guest
+    // allocates IRQ descriptors for the high GSIs used by extra virtio-mmio
+    // devices; without an intsrc entry request_irq() fails with -EINVAL.
+    for i in 0..=(IRQ_MAX as u8) {
         let size = mem::size_of::<MpcIntsrcWrapper>() as u64;
         let mut mpc_intsrc = MpcIntsrcWrapper(mpspec::mpc_intsrc::default());
         mpc_intsrc.0.type_ = mpspec::MP_INTSRC as u8;
