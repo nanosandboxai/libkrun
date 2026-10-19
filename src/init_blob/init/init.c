@@ -1461,6 +1461,70 @@ cleanup:
 
 #include <linux/route.h>
 
+/* ── Next-mode: out-of-band workload environment ───────────────────────── */
+
+/*
+ * The x86 kernel command line is capped at 2048 bytes, and libkrun turns each
+ * `KEY=VALUE` cmdline token into an environment variable for this init. A
+ * Kubernetes container's environment plus NANOSB_MOUNTS exceeds that cap, so
+ * the runtime writes it to NANOSB_ENV_FILE as NUL-separated `KEY=VALUE` pairs.
+ * Must run after the agent share is mounted and before the exec agent starts.
+ */
+static int load_env_file(void)
+{
+    const char *path = getenv("NANOSB_ENV_FILE");
+    FILE *f;
+    char *buf, *p, *end;
+    long size;
+
+    if (!path || *path == '\0') {
+        return 0;
+    }
+
+    f = fopen(path, "rb");
+    if (!f) {
+        printf("Warning: cannot open env file %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (size = ftell(f)) < 0 ||
+        size > (16 * 1024 * 1024) || fseek(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        printf("Warning: cannot size env file %s\n", path);
+        return -1;
+    }
+
+    buf = malloc((size_t)size + 1);
+    if (!buf) {
+        fclose(f);
+        printf("Warning: out of memory reading env file %s\n", path);
+        return -1;
+    }
+    size = (long)fread(buf, 1, (size_t)size, f);
+    fclose(f);
+    buf[size] = '\0';
+
+    p = buf;
+    end = buf + size;
+    while (p < end) {
+        char *eq;
+        size_t len = strlen(p);
+
+        if (len == 0) {
+            p++;
+            continue;
+        }
+        eq = strchr(p, '=');
+        if (eq) {
+            *eq = '\0';
+            setenv(p, eq + 1, 1);
+        }
+        p += len + 1;
+    }
+
+    free(buf);
+    return 0;
+}
+
 /* ── Next-mode: background workload exec agent ─────────────────────────── */
 
 /*
@@ -1840,6 +1904,9 @@ int main(int argc, char **argv)
         if (next_mode && strcmp(next_mode, "1") == 0) {
             if (mount_extra_virtiofs() < 0) {
                 printf("Warning: extra virtiofs mounts failed (continuing)\n");
+            }
+            if (load_env_file() < 0) {
+                printf("Warning: env file load failed (continuing)\n");
             }
             if (spawn_exec_agent() < 0) {
                 printf("Warning: exec agent launch failed (continuing)\n");
